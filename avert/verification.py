@@ -10,8 +10,9 @@ On top of the deterministic decision layer (approve / hold / reject from risk R 
     probability p_d) is clawed back and fined lambda times its value (Theorem 1), and the device's trust is
     slashed so that it is quarantined (all claims held) until it rebuilds trust (Theorem 2);
   * every verified claim adds its measured discrepancy (reported - true hours) to a per-device buffer; a
-    one-sided test on the buffer mean, z * max(sigma, s_m) / sqrt(m) (s_m: the buffer's sample standard
-    deviation), detects systematic sub-tolerance ("salami")
+    one-sided test on the buffer mean, z * max(sigma, s_m) / sqrt(m) (s_m: 1.4826 x the buffer's median
+    absolute deviation; only discrepancies within the tolerance enter the buffer), detects systematic
+    sub-tolerance ("salami")
     over-claiming (Proposition 3). On detection the estimated relative bias is clawed back (plus the fine)
     on everything paid to the device since the buffer was last reset, and trust is slashed.
 """
@@ -36,6 +37,8 @@ class AVERTDefender(OnlineDefender):
         self.flags = np.zeros(n, int)              # aggregate-test detections per device
         vw = cfg["trust"]["adaptive"]["verify_weight"]
         self.slash_units = self.p.get("slash", vw) / vw   # trust evidence units for an established over-claim
+        self.recent = []                           # fleet-wide sub-tolerance discrepancies, one array per day
+        self.sigma_fleet = self.sigma_e
 
     def audit_prob(self, R, rel):
         p = self.p
@@ -70,16 +73,24 @@ class AVERTDefender(OnlineDefender):
         verified = held | audited
         flagged = np.zeros(n, bool)
         if p.get("aggregate", False):
-            for i in np.flatnonzero(verified):
+            # only sub-tolerance discrepancies: larger ones are the single-claim mechanism's domain
+            sub = verified & (np.abs(over_h) <= self.tol)
+            # honest-noise scale re-estimated from the whole fleet's recent verifications (robust MAD;
+            # honest devices are the majority), so a fleet-wide rise in metering noise is tracked
+            self.recent = (self.recent + [over_h[sub]])[-int(p.get("sigma_days", 60)):]
+            pool = np.concatenate(self.recent)
+            if pool.size >= 30:
+                self.sigma_fleet = 1.4826 * float(np.median(np.abs(pool - np.median(pool))))
+            for i in np.flatnonzero(sub):
                 self.disc[i] = np.roll(self.disc[i], -1)
                 self.hrs[i] = np.roll(self.hrs[i], -1)
                 self.disc[i, -1] = over_h[i]
                 self.hrs[i, -1] = h[i]
                 d = self.disc[i][~np.isnan(self.disc[i])]
                 m = d.size
-                # scale: calibrated honest discrepancy, or the buffer's own spread if larger (robust to
-                # benign increases of metering noise; a constant sub-tolerance offset adds no spread)
-                sd = max(self.sigma_e, float(d.std(ddof=1))) if m > 1 else self.sigma_e
+                # scale: the largest of the calibrated, fleet-recent and device robust spreads (the device
+                # MAD is insensitive to a constant offset and to a minority of pre-attack entries)
+                sd = max(self.sigma_e, self.sigma_fleet, 1.4826 * float(np.median(np.abs(d - np.median(d)))))
                 if m >= p["agg_min"] and d.mean() > p["agg_z"] * sd / np.sqrt(m):
                     hh = self.hrs[i][~np.isnan(self.hrs[i])]
                     bias = max(d.mean() / max(hh.mean(), 1e-9), 0.0)

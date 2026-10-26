@@ -32,22 +32,24 @@ non-positive expected value if and only if
 
 *Proof.* Undetected with probability 1 − q p_d (gain v); detected with probability q p_d (gain −λ v). ∎
 
-**Theorem 2 (bounded extraction under randomised verification and quarantine).** Let every claim outside
-quarantine be verified with probability at least q, and let the attacker's per-claim over-claim value be at
-most v̄. Over any strategy for which each over-claim above τ is detected independently with probability at
-least q p_d, the long-run expected extracted value per claim satisfies
+**Theorem 2 (bounded extraction under randomised verification and quarantine).** Assume (A1) every claim
+outside quarantine is verified with conditional probability ≥ q given the history, (A2) a verification
+establishes an over-claim above τ with probability p_d, (A3) an establishment triggers clawback, a fine λv
+and a quarantine of ≥ K claims in which every claim is verified, and (A4) per-claim over-claim value ≤ v̄.
+Then for every (adaptive, history-dependent) strategy
 
-    g ≤ r τ  +  v̄ · max(0, (1 − q p_d) − λ q p_d) / (1 + K q p_d).
+    limsup E[Π_n]/n ≤ r τ + v̄ · max{ [1 − q p_d (1 + λ)]⁺ / (1 + K q p_d),  [1 − p_d (1 + λ)]⁺ / p_d }.
 
-*Proof sketch.* Renewal–reward. A cycle consists of a fraud phase, ending at the first detection
-(N ~ Geometric(q p_d) over-claims, gain v̄ (N − 1) − λ v̄), followed by K quarantine claims with no gain
-above the tolerance. E[N] = 1/(q p_d). Interleaving honest claims within a fraud phase adds cycle length
-without gain, so it cannot increase the average. Claims with δ ≤ τ are never established and contribute at
-most r τ each. ∎
+The payer loss (fines excluded) obeys the same bound with λ = 0.
 
-*Reading.* Without penalty (λ = 0): g ≤ rτ + v̄ (1 − q p_d)/(1 + K q p_d), which decreases in both the
-verification rate q and the quarantine length K. With the deterrence condition of Theorem 1 the second term
-vanishes, leaving only the **tolerance leakage** r τ.
+*Proof.* Potential-function (average-reward Bellman) argument with states N and Q_k, φ(N) = 0,
+φ(Q_k) = −k a; one checks E[π_t + φ(S_{t+1}) − φ(S_t) | F_{t−1}] ≤ r τ + a for every report, then sums
+(full proof in the manuscript appendix). The second term is the leakage from failed verifications during
+quarantine; it vanishes when p_d (1 + λ) ≥ 1. ∎
+
+*Reading.* The above-tolerance term decreases in the verification floor q and in the quarantine length K
+(q = 0.05, p_d = 0.95, λ = 0, K = 30: 0.39 v̄ per claim vs v̄ for a deterministic defence). What remains is
+the **tolerance leakage** r τ, which the aggregate audit addresses.
 
 **Proposition 3 (aggregate audits close the tolerance gap).** Honest metering error per claim has standard
 deviation σ. Testing the mean discrepancy of m verified claims of the same device with threshold
@@ -58,7 +60,10 @@ power ≥ 1 − β once
 
 *Example.* σ = 0.05 h, α = 10⁻³, β = 0.05, δ̄ = 0.1 h (1.25 % of an 8 h day): m ≥ 6 verified claims.
 Sub-tolerance ("salami") over-claiming is therefore detectable after a handful of audits, whereas a
-per-claim tolerance of τ = 0.5 h never detects it.
+per-claim tolerance of τ = 0.5 h never detects it. Implementation: only discrepancies within the tolerance
+enter the buffer, and the scale is max(σ, 1.4826·MAD) of the buffer, which is robust to a benign rise in
+metering noise, to outliers and to a minority of entries recorded before the over-claiming started. With
+m₀ earlier honest entries the test sees the diluted mean δ̄ n / (m₀ + n), which adds a few verifications.
 
 **Proposition 4 (distribution-free hold-rate guarantee).** Choosing the hold threshold as the
 ⌈(1 − α)(n + 1)⌉-th smallest risk among n exchangeable legitimate calibration claims guarantees

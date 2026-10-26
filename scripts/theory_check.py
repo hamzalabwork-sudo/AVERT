@@ -7,7 +7,8 @@
      and false flags on honest devices
 
     python scripts/theory_check.py --part A
-    python scripts/theory_check.py --part BC --seeds 310 --out results/theory
+    python scripts/theory_check.py --part BC --seeds 310 --out results/theory_dev
+    python scripts/theory_check.py --part BC --role confirmatory --seeds 400,401,402,403,404 --out results/theory
 """
 from __future__ import annotations
 
@@ -75,6 +76,38 @@ def uniform(cfg, q, lam, slash=None):
                 aggregate=False, conformal=False)
 
 
+def quarantine_lengths(log, comp, low):
+    """Claims spent below the low-trust gate in each completed quarantine of a compromised device."""
+    out = []
+    for i in comp:
+        below = log["T"][i] < low
+        cl = log["is_claim"][i]
+        t = 1
+        while t < below.size:
+            if below[t] and not below[t - 1]:
+                e = t
+                while e < below.size and below[e]:
+                    e += 1
+                if e < below.size:
+                    out.append(int(cl[t:e].sum()))
+                t = e
+            t += 1
+    return np.asarray(out)
+
+
+def fleet_bound(w: World, log, q, p, lam, K, tau):
+    """Theorem 2 summed over compromised devices: n_i (r_i tau + a_i) + K a_i with v_bar_i the largest
+    over-claim value device i submitted (profit bound with lam; payer-loss bound with lam = 0)."""
+    cl = log["is_claim"][w.comp]
+    over = np.clip((log["claimed"] - log["true_amt"])[w.comp], 0, None) * cl
+    n = cl.sum(1)
+    vbar = over.max(1)
+    qp = q * p
+    term = max(max(0.0, 1 - qp * (1 + lam)) / (1 + K * qp), max(0.0, 1 - p * (1 + lam)) / p)
+    a = vbar * term
+    return float((n * (w.rate[w.comp] * tau + a) + K * a).sum())
+
+
 def part_b(w: World, cfg, seed, rows):
     p = cfg["authorisation"]["verification"]["p_detect"]
     for slash, label in ((None, "no quarantine"), (cfg["avert"]["slash"], "quarantine")):
@@ -86,11 +119,22 @@ def part_b(w: World, cfg, seed, rows):
                 for aname, att in (("constant 0.20", ConstantInflation(w.comp, 0.20)),
                                    ("K3* risk-aware", RiskAwareWhiteBox(w.comp))):
                     t0 = time.time()
-                    r = summarise(w, w.run_test(copy.deepcopy(att), name))
+                    log = w.run_test(copy.deepcopy(att), name)
+                    r = summarise(w, log)
+                    ql = quarantine_lengths(log, w.comp, cfg["trust"]["low"])
+                    r["quarantine_n"] = int(ql.size)
+                    r["quarantine_median_claims"] = float(np.median(ql)) if ql.size else np.nan
+                    r["quarantine_min_claims"] = float(ql.min()) if ql.size else np.nan
                     ratio = r["payer_net_loss"] / max(r["attempted_overclaim"], 1e-9)
+                    K = 0 if slash is None or not ql.size else int(ql.min())
+                    tau = cfg["generator"]["contract"]["fraud_tolerance_hours"]
+                    r["K_used"] = K
+                    r["bound_payer_loss"] = fleet_bound(w, log, q, p, 0.0, K, tau)
+                    r["bound_profit"] = fleet_bound(w, log, q, p, lam, K, tau)
                     rows.append(dict(part="B", seed=seed, variant=label, q=q, lam=lam, attacker=aname,
                                      theory_gain_ratio=1 - q * p * (1 + lam), measured_gain_ratio=ratio, **r))
                     print(f"  [B s{seed}] {label:13s} q={q:.1f} lam={lam:.0f} {aname:15s} payer_loss/attempted={ratio:+.3f}"
+                          f" loss={r['payer_net_loss']:.0f}<=bound {r['bound_payer_loss']:.0f}; profit={r['attacker_profit']:.0f}<=bound {r['bound_profit']:.0f} K={K}"
                           f" theory<={1 - q * p * (1 + lam):+.3f} payer_loss={r['payer_net_loss']:9.0f} ({time.time() - t0:.0f}s)",
                           flush=True)
                 del w._defenders[name]
@@ -130,6 +174,7 @@ def main():
     ap.add_argument("--seeds", default="310")
     ap.add_argument("--level", type=float, default=0.20)
     ap.add_argument("--out", default="results/theory")
+    ap.add_argument("--role", default="dev", choices=("dev", "confirmatory"))
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -139,7 +184,10 @@ def main():
         return
     cfg = load_config(args.config)
     seeds = list(map(int, args.seeds.split(",")))
-    assert all(310 <= s <= 319 for s in seeds) or "quick" in args.config, "development seeds are 310-319"
+    if args.role == "dev":
+        assert all(310 <= s <= 319 for s in seeds) or "quick" in args.config, "development seeds are 310-319"
+    else:
+        assert all(400 <= s <= 404 for s in seeds), "confirmatory theory checks use seeds 400-404"
     rows = []
     for seed in seeds:
         g = copy.deepcopy(cfg["generator"])

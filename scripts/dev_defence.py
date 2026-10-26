@@ -1,7 +1,11 @@
-"""Development (seeds 310-319 only): attacker library vs defences, worst-case payer loss.
+"""Attacker library vs defences, worst-case payer loss.
 
+Development (seeds 310-319):
     python scripts/dev_defence.py --seeds 310,311 --out results/dev
     python scripts/dev_defence.py --seeds 310 --set avert.q_floor=0.1 --set avert.penalty=2 --tag qf0.1_l2 --which main
+Confirmatory (docs/confirmatory_plan.md; seeds 400-419 in distribution, 420-424 under each shift):
+    python scripts/dev_defence.py --role confirmatory --seeds 400-419 --out results/confirmatory --tag main
+    python scripts/dev_defence.py --role confirmatory --seeds 420-424 --shift S2-noisy-meters --which shift
 
 Defences: DTA (deterministic), DTA + uniform audits at several budgets (no penalty, no aggregate test),
 AVERT (configs avert block) and, with --which all, one-mechanism ablations of AVERT.
@@ -36,6 +40,23 @@ def library(comp):
     return lib
 
 
+# Pre-registered benign distribution shifts, active from the first test day (day 584).
+SHIFTS = {
+    "S1-usage-surge": {"benign_shift": dict(start_day=584, hours_multiplier=1.25)},
+    "S2-noisy-meters": {"benign_shift": dict(start_day=584, noise_multiplier=3.0)},
+    "S3-more-compromised": {"compromise_fraction": 0.40},
+    "S4-unreliable-links": {"benign_shift": dict(start_day=584, delay_prob=0.15, dropout_prob=0.05)},
+}
+
+
+def parse_seeds(s):
+    out = []
+    for part in s.split(","):
+        a, _, b = part.partition("-")
+        out += list(range(int(a), int(b or a) + 1))
+    return out
+
+
 def defences(cfg, which="all"):
     """Defence variants. Uniform audits isolate randomisation; ablations remove one AVERT mechanism each."""
     av = dict(cfg["avert"])
@@ -45,6 +66,12 @@ def defences(cfg, which="all"):
     def uni(q, penalty=0.0, slash=vw):
         return dict(base, q_floor=q, kappa_q=0.0, penalty=penalty, slash=slash, aggregate=False, conformal=False)
 
+    if which == "grid":                      # development tuning of audit weighting and quarantine strength
+        return [("DTA", None), ("uniform audits q=0.100 + penalty/slash", uni(0.10, av["penalty"], av["slash"]))] + [
+            (f"AVERT kappa={kq} slash={sl:.0f}", dict(base, kappa_q=kq, slash=sl)) for kq in (0.5, 1.0, 2.0) for sl in (50.0, 100.0)]
+    if which == "shift":
+        return [("DTA", None), ("uniform audits q=0.075 + penalty/slash", uni(0.075, av["penalty"], av["slash"])),
+                ("AVERT", base)]
     out = [("DTA", None)]
     out += [(f"uniform audits q={q:.2f}", uni(q)) for q in (0.05, 0.10, 0.15)]
     out += [(f"uniform audits q={q:.3f} + penalty/slash", uni(q, av["penalty"], av["slash"])) for q in (0.05, 0.075, 0.10)]
@@ -76,18 +103,27 @@ def main():
     ap.add_argument("--out", default="results/dev")
     ap.add_argument("--set", action="append", default=[])
     ap.add_argument("--tag", default="default")
-    ap.add_argument("--which", default="all", choices=("all", "main"))
+    ap.add_argument("--which", default="all", choices=("all", "main", "shift", "grid"))
+    ap.add_argument("--role", default="dev", choices=("dev", "confirmatory"))
+    ap.add_argument("--shift", default=None, choices=sorted(SHIFTS))
     args = ap.parse_args()
     cfg = load_config(args.config)
     apply_sets(cfg, args.set)
-    seeds = list(map(int, args.seeds.split(",")))
-    assert all(310 <= s <= 319 for s in seeds) or "quick" in args.config, "development seeds are 310-319"
+    seeds = parse_seeds(args.seeds)
+    if args.role == "dev":
+        assert all(310 <= s <= 319 for s in seeds) or "quick" in args.config, "development seeds are 310-319"
+    else:
+        assert not args.set, "the confirmatory configuration is frozen"
+        lo, hi = (420, 424) if args.shift else (400, 419)
+        assert all(lo <= s <= hi for s in seeds), f"confirmatory seeds for this scenario are {lo}-{hi}"
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     rows = []
     for seed in seeds:
         g = copy.deepcopy(cfg["generator"])
         g["compromise_fraction"] = args.level
+        if args.shift:
+            g.update(copy.deepcopy(SHIFTS[args.shift]))
         w = World(cfg, g, seed)
         w.warm_up(verify=False)
         for dname, params in defences(cfg, args.which):
@@ -95,7 +131,7 @@ def main():
                 w.add_defender(dname, params)
             for aname, att in library(w.comp):
                 t0 = time.time()
-                r = dict(tag=args.tag, seed=seed, defence=dname, attacker=aname,
+                r = dict(tag=args.tag, shift=args.shift or "none", seed=seed, defence=dname, attacker=aname,
                          **summarise(w, w.run_test(copy.deepcopy(att), dname)))
                 rows.append(r)
                 print(f"  [s{seed}] {dname:42s} {aname:18s} payer_loss={r['payer_net_loss']:9.0f} profit={r['attacker_profit']:10.0f} extracted={r['extracted_value']:9.0f}"

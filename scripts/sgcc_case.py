@@ -23,15 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from avert.adaptive import summarise  # noqa: E402
 from avert.config import load_config  # noqa: E402
 from avert.sgcc import SGCCCase, library, load_sgcc  # noqa: E402
-from scripts.dev_defence import apply_sets, defences  # noqa: E402
-
-
-def parse_seeds(s):
-    out = []
-    for part in s.split(","):
-        a, _, b = part.partition("-")
-        out += list(range(int(a), int(b or a) + 1))
-    return out
+from scripts.dev_defence import apply_sets, defences, parse_seeds  # noqa: E402
 
 
 def main():
@@ -40,7 +32,7 @@ def main():
     ap.add_argument("--data", default="data/sgcc_raw/data.csv")
     ap.add_argument("--seeds", default="310")
     ap.add_argument("--out", default="results/sgcc_dev")
-    ap.add_argument("--which", default="main", choices=("all", "main"))
+    ap.add_argument("--which", default="main", choices=("all", "main", "grid"))
     ap.add_argument("--set", action="append", default=[])
     ap.add_argument("--tag", default="sgcc")
     ap.add_argument("--confirmatory", action="store_true")
