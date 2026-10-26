@@ -89,3 +89,19 @@ authorisation:
 # Deterministic trust-aware authorisation (DTA) baseline under attack:
 #   R = 1 - T (1 - s); adaptive Beta trust; validation-calibrated thresholds; hard rules; low-trust gate.
 baseline_design: {risk: noisy_or, use_F: false, audit: false, exposure: baseline}
+
+# AVERT defence (randomised verification, clawback, quarantine, aggregate audits, conformal thresholds).
+# Starting values; tuned on development seeds only (docs/research_plan.md).
+avert:
+  q_floor: 0.05          # minimum audit probability of every auto-approved claim
+  kappa_q: 0.5           # risk- and value-weighted audit increase: q = q_floor + kappa_q * R * rel
+  q_max: 1.0
+  penalty: 1.0           # fine lambda as a multiple of an established over-claim (clawback is separate)
+  slash: 50.0            # trust evidence added to beta on an established over-claim (quarantine)
+  aggregate: true        # per-device aggregate audit test (Proposition 3)
+  agg_window: 30         # verified claims kept per device
+  agg_min: 4             # minimum verified claims before testing
+  agg_z: 4.265           # one-sided z for alpha = 1e-5 per test
+  conformal: true        # conformal hold / reject thresholds (Proposition 4)
+  alpha_hold: 0.05
+  alpha_reject: 0.01

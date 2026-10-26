@@ -5,7 +5,10 @@ Attacker knowledge levels (docs/research_plan.md):
   K1  feedback    observes its own settlement outcomes and adapts (AIMD controller)
   K3  white-box   knows features, detector, trust and thresholds; each day picks the largest over-claim
                   that is still auto-approved (cannot see the verification randomness)
-plus ConstantInflation(alpha), the best fixed over-claim fraction chosen offline (oracle sweep).
+  K3* risk-aware  white-box that also knows the audit policy, penalty and tolerance, and picks the
+                  over-claim with the highest expected immediate profit (salami included)
+plus strategy families chosen offline: constant over-claim fraction, salami offset just below the
+single-claim tolerance, and on-off bursts. The worst case is the maximum over the whole library.
 
 All adaptive attackers start from the compromised device's honest telemetry and fake correlated channels
 consistently: reported hours, hour meter, fuel and idle time are scaled together; engine speed, temperature
@@ -23,6 +26,7 @@ from .detectors import REGISTRY, FitContext, HybridStacker, Split
 from .features import FEATURES, build_features, expected_usage, hard_violations, observable_view, to_tensor
 from .generator import generate_world
 from .online import REPORT_FIELDS, OnlineDefender, OnlineDetector, OnlineFeatureEngine
+from .verification import AVERTDefender
 from .windows import WindowStore, index_grid
 
 MAX_REPORTED = 19.5
@@ -106,6 +110,72 @@ class WhiteBoxGreedy(Attacker):
         return best
 
 
+class OnOff(Attacker):
+    """Bursts of over-claiming separated by honest periods (to rebuild trust)."""
+
+    def __init__(self, comp, alpha=0.30, on=5, off=15):
+        super().__init__(comp)
+        self.alpha, self.on, self.off = alpha, on, off
+        self.name = f"on-off({alpha:.2f}, {on}/{off})"
+
+    def alphas(self, day, rep, ctx):
+        k = (day - ctx.ve) % (self.on + self.off)
+        return np.full(len(self.comp), self.alpha if k < self.on else 0.0)
+
+
+class SalamiOffset(Attacker):
+    """Adds a fixed number of hours just below the single-claim verification tolerance on every worked day."""
+
+    def __init__(self, comp, hours=0.40):
+        super().__init__(comp)
+        self.hours = hours
+        self.name = f"salami(+{hours:.2f} h)"
+
+    def alphas(self, day, rep, ctx):
+        h = rep["reported_hours"][self.comp]
+        return np.where(h > 0.2, self.hours / np.maximum(h, 1e-9), 0.0)
+
+
+class RiskAwareWhiteBox(Attacker):
+    """K3*: knows the full defence including audit probabilities, penalty and tolerance; maximises the
+    expected immediate profit of each claim (it does not anticipate aggregate audits or quarantine)."""
+
+    def __init__(self, comp, grid=(0.0, 0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10, 0.13, 0.16, 0.20, 0.25,
+                                    0.32, 0.40, 0.50, 0.65, 0.80, 1.0)):
+        super().__init__(comp)
+        self.grid = np.asarray(grid)
+        self.name = "K3* risk-aware white-box"
+
+    def alphas(self, day, rep, ctx):
+        D = ctx.defender
+        comp = self.comp
+        T = D.trust.value()[comp]
+        ta, tr = D.theta
+        low = ctx.cfg["trust"]["low"]
+        lam = D.p["penalty"] if hasattr(D, "p") else 0.0
+        h = rep["reported_hours"][comp]
+        rate = ctx.rate[comp]
+        best_a, best_g = np.zeros(len(comp)), np.full(len(comp), -np.inf)
+        for a in self.grid:
+            cand = apply_overclaim(rep, comp, np.full(len(comp), a))
+            feats, pend = ctx.engine.step(cand)
+            s = ctx.detector.score(feats, comp)
+            R = 1 - T * (1 - s)
+            new_h = cand["reported_hours"][comp]
+            v = (new_h - h) * rate
+            single = (new_h - h) > D.tol - 0.05             # margin for honest metering noise
+            app = (R < ta) & (T >= low)
+            rej = R >= tr
+            rel = new_h / np.maximum(pend.baseline[comp], 1.0)
+            q = D.audit_prob(R, rel) if hasattr(D, "audit_prob") else 0.0
+            g = np.where(app, v - single * q * D.p_det * (1 + lam) * v,
+                         np.where(rej, -h * rate, v - single * D.p_det * (1 + lam) * v))
+            better = g > best_g + 1e-9
+            best_a = np.where(better, a, best_a)
+            best_g = np.where(better, g, best_g)
+        return best_a
+
+
 # ----------------------------------------------------------------------------- defender training
 class World:
     """One simulated fleet with a trained DTA defender (TCN+XGBoost detector, adaptive trust, calibrated thresholds)."""
@@ -171,6 +241,25 @@ class World:
                            family=grid("attack_family")[sl], baseline=base[sl])
 
         self.theta, _, self.feasible = calibrate(self.spec, simdata(te, ve), cfg, vs - te, seed=seed)
+        # conformal thresholds (Proposition 4): quantiles of the risk of legitimate validation claims
+        self.val_data = simdata(te, ve)
+        trace = simulate(self.spec, self.val_data, cfg, self.theta, seed=seed, eval_from=vs - te, trace=True)["_trace"]
+        Rv = trace["R"][:, vs - te:]
+        legit = (self.val_data.hours[:, vs - te:] > 0) & (self.val_data.fraud[:, vs - te:] == 0)
+        r = np.sort(Rv[legit])
+        nr = len(r)
+
+        def cq(alpha):
+            k = min(nr - 1, int(np.ceil((1 - alpha) * (nr + 1))) - 1)
+            return float(r[k])
+
+        av = cfg["avert"]
+        self.theta_conformal = (cq(av["alpha_hold"]), max(cq(av["alpha_reject"]), cq(av["alpha_hold"]) + 1e-6))
+        # honest metering-discrepancy scale from commissioning-period calibration audits (attack-free period)
+        rh, ref = grid("reported_hours"), grid("reference_hours")
+        cm = rh[:, :g["commissioning_days"]] > 0.2
+        dd = (rh - ref)[:, :g["commissioning_days"]][cm]
+        self.sigma_e = float(1.4826 * np.median(np.abs(dd - np.median(dd))))
         self.batch_test = simulate(self.spec, simdata(te, D), cfg, self.theta, seed=seed + 1, eval_from=ve - te)
         # report-field arrays for fast day access
         self.fields = {f: grid(f).astype(float) for f in REPORT_FIELDS}
@@ -190,16 +279,20 @@ class World:
         return r
 
     # --------------------------------------------------------------------- online run
-    def _fresh_online(self):
+    def make_defender(self, name: str, params: dict | None = None):
+        if params is None:
+            return OnlineDefender(self.spec, self.cfg, self.theta, self.A, self.seed + 1)
+        theta = self.theta_conformal if params.get("conformal") else self.theta
+        return AVERTDefender(self.spec, self.cfg, theta, self.A, self.seed + 1, params, self.sigma_e)
+
+    def warm_up(self, verify=True):
+        """Run the streaming feature engine and detector over validation days on the original records.
+        Checkpoint them at test start and keep the daily inputs so each defender can be warmed up cheaply."""
         self.engine = OnlineFeatureEngine(self.obs, self.assets, self.g["commissioning_days"], self.te)
         self.detector = OnlineDetector(self.tcn, self.xgb, self.stacker, self.mean, self.std, self.W,
                                        self.engine.batch_hist, store=self.store, t0=self.te)
-        self.defender = OnlineDefender(self.spec, self.cfg, self.theta, self.A, self.seed + 1)
-
-    def warm_up(self, verify=True):
-        """Run the online pipeline on the original records over validation days; checkpoint at test start."""
-        self._fresh_online()
         max_feat, max_s = 0.0, 0.0
+        self._val_inputs = []
         for day in range(self.te, self.ve):
             rep = self.rep(day)
             feats, pend = self.engine.step(rep)
@@ -207,17 +300,29 @@ class World:
             if verify:
                 max_feat = max(max_feat, float(np.abs(feats - self.X[:, day]).max()))
                 max_s = max(max_s, float(np.abs(s - self.prob[:, day - self.te]).max()))
-            self.defender.step(rep["reported_hours"], self.rate, self.ref_h[:, day], s, self.hard[:, day], pend.baseline)
+            self._val_inputs.append((rep["reported_hours"], self.ref_h[:, day], s, self.hard[:, day], pend.baseline))
             self.engine.commit(pend)
             self.detector.commit(feats)
-        self._checkpoint = copy.deepcopy((self.engine, self.detector, self.defender))
+        self._pipe = copy.deepcopy((self.engine, self.detector))
+        self._defenders = {}
+        self.add_defender("DTA", None)
         return max_feat, max_s
 
-    def run_test(self, attacker: Attacker | None):
-        """Test period with the checkpointed defender. attacker=None replays the original (K0) records."""
-        self.engine, self.detector, self.defender = copy.deepcopy(self._checkpoint)
+    def add_defender(self, name: str, params: dict | None):
+        """Warm up a defender over the validation days (same inputs for every defender)."""
+        d = self.make_defender(name, params)
+        for h, ref, s, hard, base in self._val_inputs:
+            d.step(h, self.rate, ref, s, hard, base)
+        self._defenders[name] = d
+
+    def run_test(self, attacker: Attacker | None, defender: str = "DTA"):
+        """Test period. attacker=None replays the original (K0) records."""
+        self.engine, self.detector = copy.deepcopy(self._pipe)
+        self.defender = copy.deepcopy(self._defenders[defender])
         comp = self.comp
-        log = {k: [] for k in ("dec", "paid", "claimed", "true_amt", "fraud", "is_claim", "T", "alpha", "s")}
+        keys = ("dec", "paid", "claimed", "true_amt", "fraud", "is_claim", "T")
+        extra = ("recovered", "clawed", "fined", "verified", "flagged", "q")
+        log = {k: [] for k in (*keys, *extra, "alpha", "s")}
         for day in range(self.ve, self.D):
             if attacker is None:
                 rep = self.rep(day)
@@ -236,35 +341,50 @@ class World:
             self.detector.commit(feats)
             if attacker is not None:
                 attacker.observe(day, out["dec"])
-            for k in ("dec", "paid", "claimed", "true_amt", "fraud", "is_claim", "T"):
+            for k in keys:
                 log[k].append(out[k])
+            for k in extra:
+                log[k].append(out.get(k, np.zeros(self.A, dtype=bool if k in ("verified", "flagged") else float)))
             log["s"].append(s)
             log["alpha"].append(alpha)
-        return {k: np.stack(v, 1) for k, v in log.items()}
+        log = {k: np.stack(v, 1) for k, v in log.items()}
+        held = (log["dec"] == HOLD) & log["is_claim"]
+        log["verified"] = log["verified"] | held                     # DTA verifies held claims too
+        return log
 
 
-def summarise(w: World, log: dict) -> dict:
+def summarise(w: World, log: dict, review_cost: float = 25.0) -> dict:
     comp = w.comp
     hon = np.setdiff1d(np.arange(w.A), comp)
     cl = log["is_claim"]
     gain = (log["paid"] - log["true_amt"]) * cl
     over = (log["claimed"] - log["true_amt"]) * cl
-    c, h = (slice(None),), None
+    rec = log["recovered"]
     attempted = np.clip(over[comp], 0, None).sum()
     extracted = np.clip(gain[comp], 0, None).sum()
+    net = gain[comp].sum() - rec[comp].sum()
     legit_h = cl[hon] & ~log["fraud"][hon]
     dec_h = log["dec"][hon]
     fr = log["fraud"][comp]
+    n_ver = int((log["verified"] & cl).sum())
     return dict(
         attempted_overclaim=float(attempted),
-        extracted_value=float(extracted),
-        net_attacker_gain=float(gain[comp].sum()),
+        extracted_value=float(extracted),                  # paid above the true amount, before recovery
+        recovered_value=float(rec[comp].sum()),            # clawbacks + fines collected
+        clawed_value=float(log["clawed"][comp].sum()),
+        fine_income=float(log["fined"][comp].sum()),
+        payer_net_loss=float(extracted - log["clawed"][comp].sum()),  # over-payment not clawed back (fine income excluded)
+        attacker_profit=float(net),                        # vs. honest pay: over-payment - lost legit pay - clawbacks - fines
         extraction_rate=float(extracted / attempted) if attempted > 0 else 0.0,
-        extracted_per_comp_asset_day=float(extracted / (len(comp) * cl.shape[1])),
-        fraud_labelled_claims=int(fr.sum()),
         share_overclaim_below_tolerance=float(np.clip(over[comp], 0, None)[~fr].sum() / attempted) if attempted > 0 else 0.0,
         comp_auto_approved=float((log["dec"][comp][cl[comp]] == APPROVE).mean()),
         comp_mean_trust_end=float(log["T"][comp, -1].mean()),
+        verification_rate=float(n_ver / max(1, cl.sum())),
+        honest_verification_rate=float((log["verified"] & cl)[hon].sum() / max(1, cl[hon].sum())),
+        verification_cost=float(review_cost * n_ver),
         honest_legit_hold_rate=float((dec_h[legit_h] == HOLD).mean()),
-        mean_alpha=float(log["alpha"][:, :][:, cl[comp].any(0)].mean()) if log["alpha"].size else 0.0,
+        honest_devices_flagged=int(log["flagged"][hon].any(1).sum()),
+        honest_value_clawed=float(rec[hon].sum()),
+        comp_devices_flagged=int(log["flagged"][comp].any(1).sum()),
+        mean_alpha=float(log["alpha"][:, cl[comp].any(0)].mean()) if log["alpha"].size else 0.0,
     )

@@ -122,6 +122,14 @@ def generate_world(g: dict, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
     duty, ben, con, ac = g["duty"], g["benign"], g["contract"], g["attacks"]
     shift = ac.get("shift") or {}
     types = list(g["asset_types"])
+    # benign distribution shift from bs["start_day"] (deterministic transforms of the same random draws,
+    # so worlds without a shift are bit-identical)
+    bs = g.get("benign_shift") or {}
+    after = np.arange(D) >= bs.get("start_day", D)
+    h_mult = np.where(after, bs.get("hours_multiplier", 1.0), 1.0)
+    n_mult = np.where(after, bs.get("noise_multiplier", 1.0), 1.0)
+    p_delay = np.where(after, bs.get("delay_prob", ben["delay_prob"]), ben["delay_prob"])
+    p_drop = np.where(after, bs.get("dropout_prob", ben["dropout_prob"]), ben["dropout_prob"])
 
     site_amb, site_level = _sites(g, rng)
 
@@ -171,6 +179,8 @@ def generate_world(g: dict, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
                 t += 1
         worked = (lvl > 0) & ~maint & (rng.random(D) >= duty["absence_prob"])
         true_h = np.where(worked, np.clip(rng.normal(a.mu_hours * lvl, a.sd_hours), 0.5, 14.0), 0.0)
+        if bs:
+            true_h = np.minimum(true_h * h_mult, 18.0)
         overtime = worked & (rng.random(D) < duty["overtime_prob"])
         true_h[overtime] = np.minimum(true_h[overtime] + rng.uniform(3, 6, overtime.sum()), 20.0)
 
@@ -180,8 +190,8 @@ def generate_world(g: dict, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
             since_maint[t] = 0 if maint[t] else since_maint[t - 1] + 1
         wear = 1 + 0.0004 * since_maint
 
-        hours = np.where(worked, np.maximum(true_h + rng.normal(0, ben["hours_noise_sd"], D), 0), 0.0)
-        meter = np.where(worked, np.maximum(true_h + rng.normal(0, ben["hours_noise_sd"], D), 0), 0.0)
+        hours = np.where(worked, np.maximum(true_h + rng.normal(0, ben["hours_noise_sd"], D) * n_mult, 0), 0.0)
+        meter = np.where(worked, np.maximum(true_h + rng.normal(0, ben["hours_noise_sd"], D) * n_mult, 0), 0.0)
         fuel = true_h * a.fuel_lph * (0.35 + 0.65 * L) * rng.lognormal(0, 0.05, D)
         idle = true_h * np.clip(rng.normal(0.25 - 0.2 * (L - 0.5), 0.05, D), 0.02, 0.6)
         rpm = np.where(worked, a.idle_rpm + (a.rated_rpm - a.idle_rpm) * L + rng.normal(0, 30, D), 0.0)
@@ -211,7 +221,7 @@ def generate_world(g: dict, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
         # timestamps, sequence numbers, signatures
         offset_h = a.drift_min_per_day * (days % 30) / 60.0
         ts_sent = days * 24.0 + REPORT_HOUR + offset_h
-        delayed = rng.random(D) < ben["delay_prob"]
+        delayed = rng.random(D) < p_delay
         delay = np.where(delayed, _u(rng, ben["delay_hours"], D), rng.exponential(0.2, D))
         ts_recv = ts_sent + delay
         seq = 1000 + days
@@ -320,7 +330,7 @@ def generate_world(g: dict, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
         any_drop = np.zeros(D, bool)
         drop_masks = {}
         for name in DROPOUT_CHANNELS:
-            m = rng.random(D) < ben["dropout_prob"]
+            m = rng.random(D) < p_drop
             chans[name] = np.where(m, np.nan, chans[name])
             drop_masks[name] = m
             any_drop |= m

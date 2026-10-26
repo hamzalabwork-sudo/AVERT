@@ -30,6 +30,19 @@ def test_deterministic():
     assert a.equals(b)
 
 
+def test_benign_shift_changes_only_days_after_start():
+    g = copy.deepcopy(CFG["generator"])
+    g.update(n_assets=5, n_sites=1, compromise_fraction=0.0)
+    a, _ = generate_world(g, 11)
+    g["benign_shift"] = dict(start_day=g["n_days"])           # never active -> bit-identical
+    assert generate_world(g, 11)[0].equals(a)
+    g["benign_shift"] = dict(start_day=500, hours_multiplier=1.25, noise_multiplier=3.0)
+    b, _ = generate_world(g, 11)
+    pre = a.day < 500
+    assert a[pre].reference_hours.equals(b[pre].reference_hours)
+    assert b[~pre].reference_hours.mean() > 1.15 * a[~pre].reference_hours.mean()
+
+
 def test_no_attacks_during_commissioning(world):
     g, rec, _ = world
     assert rec.loc[rec.day < g["commissioning_days"], "anomaly_label"].sum() == 0
