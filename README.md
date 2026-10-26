@@ -20,7 +20,7 @@ randomized verification, clawback, quarantine, aggregate audits and conformal th
 | AVERT defence (`avert/verification.py`) | done |
 | Theory: deterrence condition, extraction bound under quarantine, aggregate audits, conformal hold rate (`docs/theory.md`) | done |
 | Real-data case study on SGCC smart-meter data (`avert/sgcc.py`) | done |
-| Pre-registered confirmatory evaluation (`docs/confirmatory_plan.md`) | running |
+| Pre-registered confirmatory evaluation (`docs/confirmatory_plan.md`; results in `results/confirmatory`, `results/sgcc`, `results/theory`, summary in `results/confirmatory/analysis.md`) | done |
 
 ## Layout
 

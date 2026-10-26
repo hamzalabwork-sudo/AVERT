@@ -63,7 +63,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--main", default="results/confirmatory")
     ap.add_argument("--sgcc", default="results/sgcc")
-    ap.add_argument("--theory", default="results/theory/theory_sim.csv")
+    ap.add_argument("--theory", default="results/theory")
+    ap.add_argument("--grid", default="results/dev_grid")
     ap.add_argument("--paper", default="paper")
     args = ap.parse_args()
     paper = Path(args.paper)
@@ -115,33 +116,47 @@ def main():
     adj = holm(pvals)
     md.append("Holm-adjusted p: " + ", ".join(f"{h}={adj[h]:.2g}" for h in sorted(adj)))
     nums.update(WorstDTA=k(W[DTA].mean()), WorstAVERT=k(W[AVERT].mean()), WorstUniform=k(W[UNI_MAX].mean()),
-                SgccWorstDTA=k(Wsg[DTA].mean()), SgccWorstAVERT=k(Wsg[AVERT].mean()))
+                WorstUniformPen=k(W[UNI_PEN].mean()), SgccWorstDTA=k(Wsg[DTA].mean()), SgccWorstAVERT=k(Wsg[AVERT].mean()))
 
-    # main table: worst case and honest-side costs per defence (simulator and SGCC)
-    def table(d, Wd, label, caption):
+    def verdict(h):
+        p = adj[h]
+        ps = "p_{\\mathrm{Holm}}<0.001" if p < 0.001 else f"p_{{\\mathrm{{Holm}}}}={p:.3f}"
+        return ("supported" if p < 0.05 else "not supported") + f", ${ps}$"
+
+    for h, key in (("H1", "HoneResult"), ("H2a", "HtwoaResult"), ("H2b", "HtwobResult"), ("H2c", "HtwocResult"),
+                   ("H5a", "HfiveaResult"), ("H5b", "HfivebResult")):
+        nums[key] = verdict(h)
+
+    # main table: worst case and honest-side costs per defence, simulator and SGCC side by side
+    def cells(d, Wd):
         ops = d.groupby("defence")[["honest_verification_rate", "honest_legit_hold_rate", "honest_devices_flagged"]].mean()
-        ext = worst(d, "extracted_value").mean()
-        lines = [r"\begin{table}[t]\centering\caption{" + caption + r"}\label{" + label + r"}",
-                 r"\setlength{\tabcolsep}{3pt}\footnotesize",
-                 r"\begin{tabular}{lrrrrr}\toprule",
-                 r"Defence & \multicolumn{2}{c}{Worst-case loss} & Honest & Legit. & Honest \\",
-                 r" & payer & extracted & verified & held & flagged \\\midrule"]
-        order = [c for c in Wd.columns if not c.startswith("AVERT -")] + [c for c in Wd.columns if c.startswith("AVERT -")]
-        for c in order:
+        out = {}
+        for c in Wd.columns:
             m, lo, hi = boot_ci(Wd[c])
-            name = c.replace("uniform audits", "Uniform").replace(" + penalty/slash", " +fine/quar.")
-            lines.append(f"{name} & {m / 1000:,.0f}k {{\\scriptsize[{lo / 1000:,.0f}, {hi / 1000:,.0f}]}} & {ext[c] / 1000:,.0f}k & "
-                         f"{100 * ops.loc[c, 'honest_verification_rate']:.1f}\\% & {100 * ops.loc[c, 'honest_legit_hold_rate']:.1f}\\% & "
-                         f"{ops.loc[c, 'honest_devices_flagged']:.2f} \\\\")
-        lines += [r"\bottomrule\end{tabular}\end{table}"]
-        return "\n".join(lines)
+            out[c] = (f"{m / 1000:,.0f}k {{\\scriptsize[{lo / 1000:,.0f}, {hi / 1000:,.0f}]}} & "
+                      f"{100 * ops.loc[c, 'honest_verification_rate']:.1f} & {100 * ops.loc[c, 'honest_legit_hold_rate']:.1f} & "
+                      f"{ops.loc[c, 'honest_devices_flagged']:.2f}")
+        return out
 
-    (paper / "tables" / "main.tex").write_text(table(ind, W, "tab:main",
-        "Worst case over the twelve-strategy library (20 confirmatory fleets, mean with 95\\% bootstrap CI) "
-        "and honest-side costs"), encoding="utf-8")
-    (paper / "tables" / "sgcc.tex").write_text(table(sg, Wsg, "tab:sgcc",
-        "SGCC smart-meter case study (20 customer draws): worst case over the library and honest-side costs"),
-        encoding="utf-8")
+    cs, cg = cells(ind, W), cells(sg, Wsg)
+    lines = [r"\begin{table*}[t]\centering",
+             r"\caption{Worst-case payer loss over the twelve-strategy library (mean over 20 confirmatory fleets or "
+             r"customer draws, 95\% bootstrap CI) and honest-side costs: honest claims verified (\%), legitimate claims "
+             r"held (\%) and falsely flagged honest devices per fleet}\label{tab:main}",
+             r"\footnotesize\begin{tabular}{lrrrrrrrr}\toprule",
+             r" & \multicolumn{4}{c}{Simulated fleets} & \multicolumn{4}{c}{SGCC smart meters} \\"
+             r"\cmidrule(lr){2-5}\cmidrule(lr){6-9}",
+             r"Defence & Worst-case loss & Verified & Held & Flagged & Worst-case loss & Verified & Held & Flagged \\\midrule"]
+    order = [c for c in W.columns if not c.startswith("AVERT")] + [AVERT] + [c for c in W.columns if c.startswith("AVERT -")]
+    for c in order:
+        name = c.replace("uniform audits", "Uniform").replace(" + penalty/slash", " + fine/quarantine")
+        name = name.replace("AVERT -", r"\quad without ").replace("slash", "quarantine").replace("penalty", "fine")
+        if c == AVERT:
+            lines.append(r"\midrule")
+            name = r"\textbf{AVERT}"
+        lines.append(f"{name} & {cs[c]} & {cg.get(c, '& & &')} \\\\")
+    lines += [r"\bottomrule\end{tabular}\end{table*}"]
+    (paper / "tables" / "main.tex").write_text("\n".join(lines), encoding="utf-8")
 
     # per-attacker table under DTA and AVERT
     piv = ind.pivot_table(index="attacker", columns="defence", values="payer_net_loss", aggfunc="mean", sort=False)
@@ -166,18 +181,23 @@ def main():
                              flagged=ops.loc[c, "honest_devices_flagged"]))
     sh = pd.DataFrame(rows)
     md.append("\n" + sh.round(3).to_markdown(index=False))
-    lines = [r"\begin{table}[t]\centering\caption{Distribution shift (5 fleets each): worst-case payer loss, "
-             r"legitimate-hold rate and falsely flagged honest devices}\label{tab:shift}",
+    lines = [r"\begin{table}[t]\centering\caption{Distribution shift: worst-case payer loss, legitimate-hold rate "
+             r"and falsely flagged honest devices per fleet (in distribution: 20 fleets; S1 usage surge, S2 noisy "
+             r"meters, S3 40\% compromised, S4 unreliable links: 5 fleets each)}\label{tab:shift}",
              r"\footnotesize\setlength{\tabcolsep}{3pt}\begin{tabular}{llrrr}\toprule Scenario & Defence & Worst loss & Held & Flagged \\\midrule"]
-    for _, r in sh[sh.defence.isin([DTA, "uniform audits q=0.075 + penalty/slash", AVERT])].iterrows():
-        name = r.defence.replace("uniform audits", "Uniform").replace(" + penalty/slash", " +fine/quar.")
-        lines.append(f"{r['shift']} & {name} & {r.worst / 1000:,.0f}k & {100 * r.hold:.1f}\\% & {r.flagged:.1f} \\\\")
+    sel = sh[sh.defence.isin([DTA, "uniform audits q=0.075 + penalty/slash", AVERT])]
+    sel = sel.assign(o=sel.defence.map({DTA: 0, "uniform audits q=0.075 + penalty/slash": 1, AVERT: 2}),
+                     s=sel["shift"].map(lambda x: "0" if x == "none" else x)).sort_values(["s", "o"])
+    for _, r in sel.iterrows():
+        name = r.defence.replace("uniform audits", "Uniform").replace(" + penalty/slash", " + fine/quar.")
+        label = "In distribution" if r["shift"] == "none" else r["shift"].split("-")[0]
+        lines.append(f"{label} & {name} & {r.worst / 1000:,.0f}k & {100 * r.hold:.1f}\\% & {r.flagged:.1f} \\\\")
     lines += [r"\bottomrule\end{tabular}\end{table}"]
     (paper / "tables" / "shift.tex").write_text("\n".join(lines), encoding="utf-8")
     nums.update(HoldShare=f"{100 * share:.0f}")
 
     # ------------------------------------------------------------------ H3 theory
-    th = pd.read_csv(args.theory)
+    th = pd.concat([pd.read_csv(f) for f in sorted(Path(args.theory).glob("*/theory_sim.csv"))], ignore_index=True)
     B = th[th.part == "B"]
     ok_loss = float((B.payer_net_loss <= B.bound_payer_loss).mean())
     ok_prof = float((B.attacker_profit <= B.bound_profit).mean())
@@ -196,23 +216,19 @@ def main():
                                              "prop3_m_95", "honest_devices_flagged"]].mean().round(2).to_markdown())
     nums.update(BoundShare=f"{100 * min(ok_loss, ok_prof):.0f}")
 
-    # figure: deterrence sweep
-    fig, ax = plt.subplots(figsize=(3.5, 2.5))
-    for (lam, var), d in B[B.attacker == "constant 0.20"].groupby(["lam", "variant"]):
-        g = d.groupby("q")
-        y = (g.attacker_profit.mean() / g.attempted_overclaim.mean())
-        ls = "-" if var == "no quarantine" else "--"
-        ax.plot(y.index, y.values, ls, marker="o", ms=4, lw=1.5, label=f"$\\lambda$={lam:.0f}, {var}")
-        if var == "no quarantine":
-            qq = np.linspace(0, 0.7, 50)
-            ax.plot(qq, 1 - qq * p * (1 + lam), ":", lw=1, color="0.5")
-    ax.axhline(0, color="0.3", lw=0.8)
-    ax.set_xlabel("audit probability $q$")
-    ax.set_ylabel("profit / attempted over-claim")
+    # figure: Theorem 2 in the renewal model (Monte Carlo vs bound), effect of quarantine length
+    mc = pd.read_csv(sorted(Path(args.theory).glob("*/theorem2_montecarlo.csv"))[0])
+    mc = mc[(mc.lam == 0) & (mc.rho == 1.0)]
+    fig, ax = plt.subplots(figsize=(3.5, 2.4))
+    for (K, d), col, mk in zip(mc.groupby("K"), ("#eb6834", "#1baf7a", "#2a78d6"), ("s", "^", "o")):
+        ax.plot(d.q, d.bound, "-", color=col, lw=1.5, label=f"bound, $K$={K}")
+        ax.plot(d.q, d.measured.clip(lower=0), mk, color=col, ms=5, mfc="none")
+    ax.set_xlabel("verification probability $q$")
+    ax.set_ylabel(r"extraction per claim / $\bar v$")
     ax.legend(fontsize=6, frameon=False)
     ax.grid(alpha=0.25, lw=0.5)
     fig.tight_layout()
-    fig.savefig(paper / "figs" / "deterrence.pdf")
+    fig.savefig(paper / "figs" / "bound.pdf")
     plt.close(fig)
 
     # figure: worst-case loss vs honest verification budget
@@ -228,7 +244,7 @@ def main():
                     label={AVERT: "AVERT", DTA: "DTA", "uniform": "uniform audits", "uniform+": "uniform + fine/quarantine"}[key])
     h, l = ax.get_legend_handles_labels()
     uniq = dict(zip(l, h))
-    ax.legend(uniq.values(), uniq.keys(), fontsize=6, frameon=False)
+    ax.legend(uniq.values(), uniq.keys(), fontsize=6, frameon=False, loc="lower right")
     ax.axhline(0, color="0.3", lw=0.8)
     ax.set_xlabel("honest claims verified (%)")
     ax.set_ylabel("worst-case payer loss (k)")
@@ -236,6 +252,30 @@ def main():
     fig.tight_layout()
     fig.savefig(paper / "figs" / "frontier.pdf")
     plt.close(fig)
+
+    # figure: sensitivity of AVERT to audit weighting and quarantine strength (development seeds only)
+    grid_files = sorted(Path(args.grid).glob("dev_grid_s31*.csv"))
+    if grid_files:
+        gd = pd.concat([pd.read_csv(f) for f in grid_files], ignore_index=True)
+        gw = gd.groupby(["seed", "defence"]).payer_net_loss.max().groupby("defence").mean() / 1000
+        gv = 100 * gd.groupby("defence").honest_verification_rate.mean()
+        fig, ax = plt.subplots(figsize=(3.5, 2.4))
+        for sl, col, mk in ((50, "#86b6ef", "o"), (100, "#2a78d6", "o")):
+            names = [n for n in gw.index if n.endswith(f"slash={sl}")]
+            names.sort(key=lambda n: gv[n])
+            ax.plot(gv[names], gw[names], "-" + mk, color=col, ms=5, lw=1.5, label=f"AVERT, slash {sl}")
+            for n in names:
+                ax.annotate(f"$\\kappa_q$={n.split('kappa=')[1].split()[0]}", (gv[n], gw[n]), fontsize=5,
+                            xytext=(3, 4) if sl == 50 else (3, -9), textcoords="offset points")
+        n = "uniform audits q=0.100 + penalty/slash"
+        ax.plot(gv[n], gw[n], "D", color=STYLE["uniform+"][0], ms=5, label="uniform + fine/quarantine, $q$=0.10")
+        ax.set_xlabel("honest claims verified (%)")
+        ax.set_ylabel("worst-case payer loss (k)")
+        ax.legend(fontsize=6, frameon=False)
+        ax.grid(alpha=0.25, lw=0.5)
+        fig.tight_layout()
+        fig.savefig(paper / "figs" / "sensitivity.pdf")
+        plt.close(fig)
 
     # figure: RQ1 extracted value by strategy under DTA (simulator and SGCC)
     fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.4), sharey=False)
