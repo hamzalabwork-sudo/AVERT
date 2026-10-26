@@ -59,6 +59,10 @@ class Attacker:
     def observe(self, day, dec):
         pass
 
+    def feedback(self, day, out):
+        """Settlement outcome of the period (learning attackers use the realized profit)."""
+        pass
+
 
 class ConstantInflation(Attacker):
     def __init__(self, comp, alpha):
@@ -315,10 +319,13 @@ class World:
             d.step(h, self.rate, ref, s, hard, base)
         self._defenders[name] = d
 
-    def run_test(self, attacker: Attacker | None, defender: str = "DTA"):
-        """Test period. attacker=None replays the original (K0) records."""
+    def run_test(self, attacker: Attacker | None, defender: str = "DTA", rng_seed: int | None = None):
+        """Test period. attacker=None replays the original (K0) records. rng_seed re-draws the defender's
+        verification randomness (used when training learning attackers, so they cannot memorize audits)."""
         self.engine, self.detector = copy.deepcopy(self._pipe)
         self.defender = copy.deepcopy(self._defenders[defender])
+        if rng_seed is not None:
+            self.defender.rng = np.random.default_rng(rng_seed)
         comp = self.comp
         keys = ("dec", "paid", "claimed", "true_amt", "fraud", "is_claim", "T")
         extra = ("recovered", "clawed", "fined", "verified", "flagged", "q")
@@ -341,6 +348,7 @@ class World:
             self.detector.commit(feats)
             if attacker is not None:
                 attacker.observe(day, out["dec"])
+                attacker.feedback(day, out)
             for k in keys:
                 log[k].append(out[k])
             for k in extra:
