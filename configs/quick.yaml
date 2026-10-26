@@ -1,0 +1,6 @@
+# Smoke-test configuration: shorter training. Results are for checking the pipeline only.
+base: default.yaml
+
+detectors:
+  deep: {epochs: 10, patience: 3}
+  lstm_ae: {epochs: 12}

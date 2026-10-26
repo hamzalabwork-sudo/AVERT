@@ -1,0 +1,7 @@
+{
+  "seed": 300,
+  "max_feature_diff": 3.814491293496758e-06,
+  "max_score_diff": 4.721625291970177e-06,
+  "fvs_online": 11988.5,
+  "fvs_batch": 11988.5
+}

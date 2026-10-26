@@ -1,0 +1,91 @@
+# AVERT experimental configuration.
+# Every value here is a documented experimental assumption, not a measured result.
+# quick.yaml shortens training for smoke tests.
+
+generator:
+  n_assets: 100
+  n_sites: 10
+  n_days: 730                 # one usage report (and potential claim) per asset per day
+  commissioning_days: 120     # freshly provisioned devices; no attacks are scheduled here
+  compromise_fraction: 0.10   # overridden per experiment level
+  asset_types:
+    excavator:     {rate: 95.0,  fuel_lph: 18.0, idle_rpm: 800,  rated_rpm: 1900, vib: 1.00, base_temp: 82.0}
+    wheel_loader:  {rate: 80.0,  fuel_lph: 14.0, idle_rpm: 750,  rated_rpm: 2100, vib: 0.85, base_temp: 85.0}
+    crawler_crane: {rate: 140.0, fuel_lph: 22.0, idle_rpm: 700,  rated_rpm: 1800, vib: 0.60, base_temp: 80.0}
+    generator_set: {rate: 45.0,  fuel_lph: 9.0,  idle_rpm: 1500, rated_rpm: 1800, vib: 0.40, base_temp: 88.0}
+  duty:
+    hours_mean: [6.0, 10.0]   # per-asset mean operating hours on a full-activity day
+    hours_sd: [0.5, 1.5]
+    load_mean: [0.4, 0.8]     # per-asset mean engine load factor
+    absence_prob: 0.03        # asset idle on a site working day
+    overtime_prob: 0.03       # legitimate long shifts (benign high usage)
+    maintenance_rate: 0.0167  # ~ one maintenance stop every 60 days
+    maintenance_days: [1, 4]
+  benign:
+    hours_noise_sd: 0.05      # meter / rounding noise on reported hours
+    dropout_prob: 0.01        # per channel per report
+    stuck_sensor_rate: 0.004  # per asset-day start probability
+    stuck_sensor_days: [2, 7]
+    delay_prob: 0.03
+    delay_hours: [6, 60]      # delayed and possibly out-of-order delivery
+    clock_drift_sd_min: 1.0   # minutes per day, resynchronised every 30 days
+  contract:
+    max_daily_hours: 20.0
+    fraud_tolerance_hours: 0.5
+    ts_window_hours: 72.0
+  attacks:
+    families: [inflation, replay, forged_identity, gradual, on_off]
+    knowledge_mix: {naive: 0.35, consistent: 0.40, adaptive: 0.25}
+    inflation:       {alpha: [0.15, 0.50], episode_days: [5, 30], gap_days: [10, 40], phantom_prob: 0.2}
+    on_off:          {alpha: [0.40, 0.80], on_days: [5, 15], off_days: [10, 40]}
+    gradual:         {rate_per_day: [0.002, 0.010], cap: 0.60}
+    replay:          {episode_days: [5, 20], gap_days: [15, 45], daily_prob: 0.5, lag_days: [7, 60]}
+    forged_identity: {alpha: [0.10, 0.40], episode_days: [3, 15], gap_days: [20, 60]}
+    adaptive:        {alpha: [0.04, 0.10], gradual_rate: [0.0005, 0.002], gradual_cap: 0.15}
+    shift: null               # set by distribution-shift scenarios
+
+splits:                       # chronological, in days
+  train_end: 438              # train: [0, 438)
+  val_split: 511              # val_calib: [438, 511)  -> score calibration, stacking, early stopping
+  val_end: 584                # val_policy: [511, 584) -> detection threshold, financial thresholds
+  asset_holdout_fraction: 0.3 # test: [584, 730)
+
+windows:
+  length: 40                  # chosen by scripts/select_window.py from {20, 40, 60}
+
+detectors:
+  enabled: [rules, iforest, xgboost, lstm, tcn, lstm_ae, hybrid, tcn_xgb]
+  primary: tcn_xgb        # v2: chosen on selection worlds (seeds 100-105) before the confirmatory run
+  deep: {epochs: 25, patience: 4, batch_size: 512, lr: 0.001, threads: 3}
+  tcn: {channels: 32, kernel: 3, dilations: [1, 2, 4, 8], dropout: 0.1}
+  lstm: {hidden: 64}
+  lstm_ae: {hidden: 32, epochs: 30}
+  xgboost: {n_estimators: 300, max_depth: 6, learning_rate: 0.1}
+  iforest: {n_estimators: 200}
+
+trust:
+  prior: [8.0, 1.0]           # Beta prior shared by all trust models -> onboarding trust 0.89
+  trusted: 0.80
+  low: 0.60
+  adaptive: {gamma: 0.98, kappa: 2.0, exposure_cap: 3.0, hard_penalty: 5.0, verify_weight: 5.0}
+  beta: {gamma: 0.98}
+  ewma: {lam: 0.95}
+
+authorisation:
+  tau: 0.5                    # exposure saturates when a claim exceeds expected usage by 50 %
+  f_max: 0.5                  # cap on F: exposure alone escalates to Hold, never forces Reject
+  history_days: 28
+  provisional: {approve: 0.30, reject: 0.60}
+  combiner_weights: [0.3333, 0.3333, 0.3334]   # weighted-sum ablation: (1-T, s, F)
+  verification: {p_detect: 0.95, delay_days: 3}
+  audit_rate: 0.02            # used only by the "+random audits" variant (cost counted, no recovery)
+  el_floor: 0.7               # expected-loss variant: R = q * (el_floor + (1 - el_floor) * x)
+  costs: {review: 25.0, false_reject_factor: 0.2}
+  objective: {max_legit_hold: 0.05, max_legit_reject: 0.01}
+  grid:
+    approve: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60]
+    reject_gap: [0.05, 0.10, 0.20, 0.30, 0.40, 0.60]
+
+# Deterministic trust-aware authorisation (DTA) baseline under attack:
+#   R = 1 - T (1 - s); adaptive Beta trust; validation-calibrated thresholds; hard rules; low-trust gate.
+baseline_design: {risk: noisy_or, use_F: false, audit: false, exposure: baseline}
